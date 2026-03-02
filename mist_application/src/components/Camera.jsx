@@ -1,6 +1,8 @@
 'use client'
 
 import { useEffect, useRef, useState, useCallback } from "react";
+import { Battery, Wifi, WifiOff, Mic, MicOff, Camera as CameraIcon, CameraOff, Square, Circle } from "lucide-react";
+import { logTacticalEvent } from "../hooks/useMistStream";
 
 const WS_URL = "ws://localhost:8080";
 const VIDEO_CAPTURE_INTERVAL = 1000;
@@ -17,13 +19,10 @@ const Camera = () => {
       const [selectedVideoId, setSelectedVideoId] = useState('');
       const [selectedAudioId, setSelectedAudioId] = useState('');
 
-      const [facingMode, setFacingMode] = useState('user');
+      const [facingMode, setFacingMode] = useState('environment');
 
       const videoRef = useRef(null);
       const streamRef = useRef(null);
-
-      const [isStreaming, setIsStreaming] = useState(true);
-
 
       const [sessionActive, setSessionActive] = useState(false);
       const [geminiStatus, setGeminiStatus] = useState('disconnected');
@@ -35,6 +34,30 @@ const Camera = () => {
       const videoCaptureRef = useRef(null);
       const audioQueueRef = useRef([]);
       const isPlayingRef = useRef(false);
+
+      const [recordingTime, setRecordingTime] = useState(0);
+      const [isMuted, setIsMuted] = useState(false);
+      const [isCameraOff, setIsCameraOff] = useState(false);
+
+      useEffect(() => {
+            let interval = null;
+            if (sessionActive) {
+                  interval = setInterval(() => {
+                        setRecordingTime(prev => prev + 1);
+                  }, 1000);
+            } else {
+                  clearInterval(interval);
+                  setRecordingTime(0);
+            }
+            return () => clearInterval(interval);
+      }, [sessionActive]);
+
+      const formatTime = (seconds) => {
+            const h = Math.floor(seconds / 3600).toString().padStart(2, '0');
+            const m = Math.floor((seconds % 3600) / 60).toString().padStart(2, '0');
+            const s = (seconds % 60).toString().padStart(2, '0');
+            return `${h}:${m}:${s}`;
+      };
 
       const enumerateDevices = useCallback(async () => {
             try {
@@ -75,6 +98,13 @@ const Camera = () => {
                   const stream = await navigator.mediaDevices.getUserMedia(constraints);
                   streamRef.current = stream;
 
+                  stream.getAudioTracks().forEach(track => {
+                        track.enabled = !isMuted;
+                  });
+                  stream.getVideoTracks().forEach(track => {
+                        track.enabled = !isCameraOff;
+                  });
+
                   if (videoRef.current) {
                         videoRef.current.srcObject = stream;
                         await videoRef.current.play();
@@ -89,7 +119,7 @@ const Camera = () => {
                   setError(err.message);
                   setIsActive(false);
             }
-      }, [facingMode, enumerateDevices]);
+      }, [facingMode, enumerateDevices, isMuted, isCameraOff]);
 
       useEffect(() => {
             startCamera(selectedVideoId, selectedAudioId);
@@ -99,8 +129,8 @@ const Camera = () => {
                         streamRef.current.getTracks().forEach(t => t.stop());
                   }
             };
-      }, []);
-
+            // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, []); // Start initially
 
       const playAudioQueue = useCallback(async () => {
             if (isPlayingRef.current) return;
@@ -113,13 +143,11 @@ const Camera = () => {
                               playbackContextRef.current = new AudioContext({ sampleRate: PLAYBACK_SAMPLE_RATE });
                         }
 
-
                         const binaryStr = atob(base64Data);
                         const bytes = new Uint8Array(binaryStr.length);
                         for (let i = 0; i < binaryStr.length; i++) {
                               bytes[i] = binaryStr.charCodeAt(i);
                         }
-
 
                         const int16 = new Int16Array(bytes.buffer);
                         const float32 = new Float32Array(int16.length);
@@ -150,7 +178,6 @@ const Camera = () => {
             isPlayingRef.current = false;
       }, []);
 
-
       const startSession = useCallback(() => {
             if (wsRef.current) return;
             if (!streamRef.current) {
@@ -180,8 +207,9 @@ const Camera = () => {
                               audioQueueRef.current.push(msg.data);
                               playAudioQueue();
                         } else if (msg.type === 'interrupted') {
-
                               audioQueueRef.current.length = 0;
+                        } else if (msg.type === 'mist_event' && msg.payload) {
+                              logTacticalEvent(msg.payload);
                         } else if (msg.type === 'error') {
                               console.error('Server error:', msg.message);
                         }
@@ -204,7 +232,6 @@ const Camera = () => {
             };
       }, [playAudioQueue]);
 
-
       const stopSession = useCallback(() => {
             stopCapture();
 
@@ -217,7 +244,6 @@ const Camera = () => {
             setGeminiStatus('disconnected');
             audioQueueRef.current.length = 0;
       }, []);
-
 
       const startAudioCapture = useCallback(() => {
             if (!streamRef.current) return;
@@ -233,7 +259,6 @@ const Camera = () => {
             const source = audioContextRef.current.createMediaStreamSource(audioStream);
             sourceRef.current = source;
 
-
             const processor = audioContextRef.current.createScriptProcessor(4096, 1, 1);
             processorRef.current = processor;
 
@@ -242,13 +267,11 @@ const Camera = () => {
 
                   const inputData = e.inputBuffer.getChannelData(0);
 
-
                   const int16 = new Int16Array(inputData.length);
                   for (let i = 0; i < inputData.length; i++) {
                         const s = Math.max(-1, Math.min(1, inputData[i]));
                         int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
                   }
-
 
                   const bytes = new Uint8Array(int16.buffer);
                   let binary = '';
@@ -267,7 +290,6 @@ const Camera = () => {
             processor.connect(audioContextRef.current.destination);
       }, []);
 
-
       const startVideoCapture = useCallback(() => {
             const canvas = document.createElement('canvas');
 
@@ -283,7 +305,6 @@ const Camera = () => {
                   ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
                   const dataUrl = canvas.toDataURL('image/jpeg', 0.6);
-
                   const base64 = dataUrl.split(',')[1];
 
                   wsRef.current.send(JSON.stringify({
@@ -292,7 +313,6 @@ const Camera = () => {
                   }));
             }, VIDEO_CAPTURE_INTERVAL);
       }, []);
-
 
       const stopCapture = useCallback(() => {
             if (processorRef.current) {
@@ -317,190 +337,146 @@ const Camera = () => {
             }
       }, []);
 
-
       useEffect(() => {
             return () => {
                   stopSession();
             };
       }, [stopSession]);
 
-      const handleVideoChange = (e) => {
-            const id = e.target.value;
-            setSelectedVideoId(id);
-            startCamera(id, selectedAudioId);
+      const toggleCameraMode = () => {
+            setIsCameraOff(prev => {
+                  const newState = !prev;
+                  if (streamRef.current) {
+                        streamRef.current.getVideoTracks().forEach(track => {
+                              track.enabled = !newState;
+                        });
+                  }
+                  return newState;
+            });
       };
 
-      const handleAudioChange = (e) => {
-            const id = e.target.value;
-            setSelectedAudioId(id);
-            startCamera(selectedVideoId, id);
+      const toggleMute = () => {
+            setIsMuted(prev => {
+                  const newMuted = !prev;
+                  if (streamRef.current) {
+                        streamRef.current.getAudioTracks().forEach(track => {
+                              track.enabled = !newMuted;
+                        });
+                  }
+                  return newMuted;
+            });
       };
-
-      const toggleFacingMode = () => {
-            const next = facingMode === 'user' ? 'environment' : 'user';
-            setFacingMode(next);
-            startCamera('', selectedAudioId);
-      };
-
-      const trimLabel = (label, idx, kind) => {
-            if (!label) return `${kind} ${idx + 1}`;
-            return label.length > 30 ? label.slice(0, 28) + '…' : label;
-      };
-
-      const statusColor = geminiStatus === 'connected'
-            ? 'bg-emerald-400'
-            : geminiStatus === 'connecting'
-                  ? 'bg-amber-400 animate-pulse'
-                  : 'bg-white/30';
 
       return (
-            <div className="relative w-screen h-screen overflow-hidden bg-black">
+            <div className="relative w-full h-full overflow-hidden bg-black font-mono select-none">
+                  {/* Background Camera Feed */}
                   <video
                         ref={videoRef}
                         autoPlay
                         muted
                         playsInline
-                        className="absolute inset-0 w-full h-full object-cover"
+                        className={`absolute inset-0 w-full h-full object-cover ${isCameraOff ? 'hidden' : ''}`}
                   />
 
-                  {error && (
-                        <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/80">
-                              <div className="text-center px-8">
-                                    <svg className="mx-auto mb-4 w-14 h-14 text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
-                                                d="M12 9v3m0 4h.01M5.07 19h13.86a2 2 0 001.74-2.97L13.74 4.03a2 2 0 00-3.48 0L3.33 16.03A2 2 0 005.07 19z" />
-                                    </svg>
-                                    <p className="text-white/70 text-sm">{error}</p>
+                  {/* Camera Off Overlay */}
+                  {isCameraOff && (
+                        <div className="absolute inset-0 w-full h-full bg-neutral-800 flex items-center justify-center z-0">
+                              <CameraOff className="w-24 h-24 text-white/20" strokeWidth={1} />
+                        </div>
+                  )}
+
+                  {/* Top Header (Status) */}
+                  <div className="absolute top-0 left-0 right-0 landscape:w-32 landscape:h-full z-20 flex landscape:flex-col items-center justify-between px-5 pt-10 landscape:pt-5 landscape:px-0 landscape:py-6 pb-4">
+                        {/* Left: REC Status */}
+                        <div className="flex landscape:flex-col items-center gap-2 landscape:gap-4">
+                              {sessionActive ? (
+                                    <>
+                                          <div className="w-4 h-4 bg-red-600 rounded-full animate-pulse shadow-[0_0_15px_rgba(220,38,38,0.8)]" />
+                                          <span className="text-red-500 font-bold text-xl tracking-widest drop-shadow-md landscape:-rotate-90 landscape:translate-y-8">{formatTime(recordingTime)}</span>
+                                    </>
+                              ) : (
+                                    <>
+                                          <div className="w-4 h-4 bg-white/30 rounded-full" />
+                                          <span className="text-white/50 font-bold text-xl tracking-widest drop-shadow-md landscape:-rotate-90 landscape:translate-y-8">00:00:00</span>
+                                    </>
+                              )}
+                        </div>
+
+                        {/* Right: Signal & Battery */}
+                        <div className="flex landscape:flex-col items-center gap-3 landscape:gap-6 text-white">
+                              {geminiStatus === 'connected' ? (
+                                    <Wifi className="w-6 h-6 text-emerald-400 drop-shadow-md landscape:-rotate-90" />
+                              ) : geminiStatus === 'connecting' ? (
+                                    <Wifi className="w-6 h-6 text-amber-400 animate-pulse drop-shadow-md landscape:-rotate-90" />
+                              ) : (
+                                    <WifiOff className="w-6 h-6 text-white/40 drop-shadow-md landscape:-rotate-90" />
+                              )}
+                              <Battery className="w-7 h-7 text-white drop-shadow-md landscape:-rotate-90" />
+                        </div>
+                  </div>
+
+                  {/* Bottom Dock (Controls) */}
+                  <div className="absolute bottom-0 left-0 right-0 h-1/3 landscape:w-36 landscape:h-full landscape:right-0 landscape:left-auto landscape:top-0 z-30 flex landscape:flex-col items-center justify-between px-6 pb-12 landscape:px-0 landscape:py-6">
+                        {/* Secondary Action (Left/Top): Mute Mic */}
+                        <button
+                              onClick={toggleMute}
+                              className={`w-16 h-16 landscape:w-14 landscape:h-14 rounded-full flex items-center justify-center backdrop-blur-md transition-all active:scale-95 ${isMuted ? 'bg-orange-500/20 text-orange-500 border-2 border-orange-500' : 'bg-white/10 text-white border-2 border-white/30 hover:bg-white/20'
+                                    }`}
+                        >
+                              {isMuted ? <MicOff className="w-6 h-6 landscape:w-5 landscape:h-5" /> : <Mic className="w-6 h-6 landscape:w-5 landscape:h-5" />}
+                        </button>
+
+                        {/* Main Stream Button */}
+                        <button
+                              onClick={sessionActive ? stopSession : startSession}
+                              disabled={geminiStatus === 'connecting'}
+                              className={`relative flex items-center justify-center w-28 h-28 landscape:w-20 landscape:h-20 rounded-full border-[6px] transition-all active:scale-95 ${sessionActive
+                                    ? 'border-red-500/50 bg-transparent'
+                                    : 'border-white/50 bg-transparent'
+                                    } disabled:opacity-50`}
+                        >
+                              <div className={`w-20 h-20 landscape:w-14 landscape:h-14 rounded-full flex items-center justify-center transition-all ${sessionActive ? 'bg-red-600 shadow-[0_0_30px_rgba(220,38,38,0.8)]' : 'bg-white'
+                                    }`}>
+                                    {sessionActive ? (
+                                          <Square className="w-8 h-8 landscape:w-5 landscape:h-5 text-white fill-current" />
+                                    ) : (
+                                          <Circle className="w-8 h-8 landscape:w-5 landscape:h-5 text-black fill-current" />
+                                    )}
                               </div>
-                        </div>
-                  )}
+                        </button>
 
+                        {/* Secondary Action (Right/Bottom): Toggle Camera */}
+                        <button
+                              onClick={toggleCameraMode}
+                              className={`w-16 h-16 landscape:w-14 landscape:h-14 rounded-full flex items-center justify-center backdrop-blur-md transition-all active:scale-95 ${isCameraOff ? 'bg-orange-500/20 text-orange-500 border-2 border-orange-500' : 'bg-white/10 text-white border-2 border-white/30 hover:bg-white/20'
+                                    }`}
+                        >
+                              {isCameraOff ? <CameraOff className="w-6 h-6 landscape:w-5 landscape:h-5" /> : <CameraIcon className="w-6 h-6 landscape:w-5 landscape:h-5" />}
+                        </button>
+                  </div>
+
+                  {/* Loader Overlay */}
                   {!isActive && !error && (
-                        <div className="absolute inset-0 z-20 flex items-center justify-center bg-black">
-                              <div className="w-10 h-10 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                        <div className="absolute inset-0 z-40 flex items-center justify-center bg-black">
+                              <div className="w-12 h-12 border-4 border-white/30 border-t-white rounded-full animate-spin" />
                         </div>
                   )}
 
-
-                  {!isStreaming && (
-                        <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/80">
-                              <div className="text-center px-8">
-                                    <svg className="mx-auto mb-4 w-14 h-14 text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
-                                                d="M12 9v3m0 4h.01M5.07 19h13.86a2 2 0 001.74-2.97L13.74 4.03a2 2 0 00-3.48 0L3.33 16.03A2 2 0 005.07 19z" />
-                                    </svg>
-                                    <h1 className="text-white/70 text-2xl">Please check your connection.</h1>
-
+                  {/* Error Overlay */}
+                  {error && (
+                        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/95">
+                              <div className="text-center px-6 text-red-500 font-bold text-lg uppercase tracking-widest border-2 border-red-500 p-6 rounded-xl bg-red-500/10 max-w-[90%]">
+                                    <span className="block mb-2 text-xl">SYSTEM ERROR</span>
+                                    <span className="text-white/80 text-xs font-normal normal-case block leading-relaxed">{error}</span>
                                     <button
                                           onClick={() => window.location.reload()}
-                                          className="mt-4 px-4 py-2 bg-white text-black rounded-lg"
+                                          className="mt-6 px-4 py-2 bg-red-600 text-white rounded-lg text-sm hover:bg-red-700 active:scale-95 transition-all"
                                     >
-                                          Retry
+                                          REBOOT SYSTEM
                                     </button>
                               </div>
                         </div>
                   )}
-
-
-                  <div
-                        className="absolute top-0 left-0 right-0 z-30"
-                        style={{
-                              background: 'linear-gradient(to bottom, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.45) 60%, transparent 100%)',
-                        }}
-                  >
-                        <div className="flex items-center justify-between gap-3 px-5 pt-5 pb-10">
-
-                              <div className="flex items-center gap-3 flex-wrap justify-center">
-                                    <div className="flex items-center gap-1.5">
-                                          <svg className="w-4 h-4 text-white/60 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
-                                                      d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M4 6h8a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V8a2 2 0 012-2z" />
-                                          </svg>
-                                          <select
-                                                value={selectedVideoId}
-                                                onChange={handleVideoChange}
-                                                className="bg-white/10 text-white text-xs rounded-lg px-2.5 py-1.5 outline-none
-                                                           backdrop-blur-sm border border-white/10 cursor-pointer
-                                                           hover:bg-white/15 transition-colors max-w-[180px]"
-                                          >
-                                                {videoDevices.map((d, i) => (
-                                                      <option key={d.deviceId} value={d.deviceId} className="bg-neutral-900 text-white">
-                                                            {trimLabel(d.label, i, 'Camera')}
-                                                      </option>
-                                                ))}
-                                          </select>
-                                    </div>
-
-                                    <div className="flex items-center gap-1.5">
-                                          <svg className="w-4 h-4 text-white/60 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
-                                                      d="M19 11a7 7 0 01-14 0M12 19v2m-3 0h6M12 1a3 3 0 00-3 3v7a3 3 0 006 0V4a3 3 0 00-3-3z" />
-                                          </svg>
-                                          <select
-                                                value={selectedAudioId}
-                                                onChange={handleAudioChange}
-                                                className="bg-white/10 text-white text-xs rounded-lg px-2.5 py-1.5 outline-none
-                                                           backdrop-blur-sm border border-white/10 cursor-pointer
-                                                           hover:bg-white/15 transition-colors max-w-[180px]"
-                                          >
-                                                {audioDevices.map((d, i) => (
-                                                      <option key={d.deviceId} value={d.deviceId} className="bg-neutral-900 text-white">
-                                                            {trimLabel(d.label, i, 'Mic')}
-                                                      </option>
-                                                ))}
-                                          </select>
-                                    </div>
-                              </div>
-
-                              <button
-                                    onClick={toggleFacingMode}
-                                    title="Switch camera"
-                                    className="shrink-0 p-2 rounded-full bg-white/10 backdrop-blur-sm border border-white/10
-                                               hover:bg-white/20 transition-colors cursor-pointer"
-                              >
-                                    <svg className="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
-                                                d="M4 4v5h5M20 20v-5h-5M7.5 19.8A9 9 0 0021 12M3 12a9 9 0 0013.5-7.8" />
-                                    </svg>
-                              </button>
-                        </div>
-                  </div>
-
-
-                  <div
-                        className="absolute bottom-0 left-0 right-0 z-30"
-                        style={{
-                              background: 'linear-gradient(to top, rgba(0,0,0,0.9) 0%, rgba(0,0,0,0.5) 60%, transparent 100%)',
-                        }}
-                  >
-                        <div className="flex items-center justify-center gap-4 px-5 pb-10 pt-16">
-
-                              <div className="flex items-center gap-2">
-                                    <div className={`w-2.5 h-2.5 rounded-full ${statusColor}`} />
-                                    <span className="text-white/60 text-xs uppercase tracking-wider">
-                                          {geminiStatus === 'connected' ? 'Live' : geminiStatus === 'connecting' ? 'Connecting…' : 'Offline'}
-                                    </span>
-                              </div>
-
-
-                              <button
-                                    onClick={sessionActive ? stopSession : startSession}
-                                    disabled={geminiStatus === 'connecting'}
-                                    className={`
-                                          px-6 py-3 rounded-full text-sm font-semibold tracking-wide
-                                          transition-all duration-200 cursor-pointer
-                                          ${sessionActive
-                                                ? 'bg-red-500/90 hover:bg-red-500 text-white shadow-lg shadow-red-500/25'
-                                                : 'bg-white/90 hover:bg-white text-black shadow-lg shadow-white/25'
-                                          }
-                                          disabled:opacity-50 disabled:cursor-not-allowed
-                                          backdrop-blur-sm
-                                    `}
-                              >
-                                    {sessionActive ? '⏹ Stop Session' : '🎙 Start Session'}
-                              </button>
-                        </div>
-                  </div>
             </div>
       );
 };
